@@ -1,0 +1,222 @@
+# Установка необходимых библиотек для работы с LLM, векторными базами и OpenAI
+# langchain — фреймворк для построения приложений с LLM
+# openai — клиент для API OpenAI
+# faiss-cpu — библиотека для эффективного поиска в векторных базах (на CPU)
+# langchain-openai, langchain-community — интеграции LangChain с OpenAI и другими компонентами
+# chromadb — локальная векторная база данных
+# tiktoken — токенизатор от OpenAI для подсчёта токенов
+!pip install langchain openai faiss-cpu langchain-openai langchain-community chromadb tiktoken
+# Импорт стандартной библиотеки os для работы с переменными окружения
+import os
+# Импорт эмбеддингов OpenAI для преобразования текста в векторы
+from langchain.embeddings.openai import OpenAIEmbeddings
+# Импорт FAISS — векторной базы данных (в коде не используется, но импортирован)
+from langchain.vectorstores import FAISS
+# Импорт инструмента для разделения текста на фрагменты (чанки)
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+# Импорт модели OpenAI (устаревший способ, в коде не используется напрямую)
+from langchain.llms import OpenAI
+# Импорт цепочки RetrievalQA — для создания системы вопрос-ответ с поиском
+from langchain.chains import RetrievalQA
+# Импорт загрузчика документов из директории (в коде не используется)
+from langchain.document_loaders import DirectoryLoader
+# Импорт шаблонов для формирования промптов (в коде не используется)
+from langchain.prompts import PromptTemplate
+# Импорт getpass для безопасного ввода паролей/ключей (без отображения ввода)
+import getpass
+# Импорт клиента OpenAI для прямого взаимодействия с API
+import openai
+
+# Запрос у пользователя ключа API от OpenAI (ввод не отображается на экране)
+os.environ["OPENAI_API_KEY"] = getpass.getpass("Введите OpenAI API Key:")
+
+# Импорт Chroma — локальной векторной базы данных для хранения эмбеддингов
+from langchain.vectorstores import Chroma
+
+# Импорт tiktoken — токенизатора для подсчёта токенов в тексте
+import tiktoken
+
+# Импорт re — модуля для работы с регулярными выражениями
+import re
+
+# Повторный импорт os (избыточно, уже был)
+import os
+
+# Импорт requests — для выполнения HTTP-запросов (например, к Google Docs)
+import requests
+
+# Импорт другого сплиттера текста — по символам (используется в коде)
+from langchain.text_splitter import CharacterTextSplitter
+
+# Импорт класса Document — для представления фрагментов текста с метаданными
+from langchain.docstore.document import Document
+
+
+# Определение базового класса "нейро-сотрудника" — GPT
+class GPT:
+    def __init__(self, model="gpt-3.5-turbo"):
+        self.log = ''  # Логи всех действий модели (например, количество токенов)
+        self.model = model  # Модель OpenAI, используемая для генерации
+        self.search_index = None  # Векторная база знаний (пока пуста)
+        # Создание клиента OpenAI с API-ключом из переменной окружения
+        self.client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+    # Метод для загрузки документа из Google Docs по URL
+    def load_search_indexes(self, url):
+        # Проверка, что ссылка начинается с http/https
+        if not url.startswith("http"):
+            raise ValueError("Неверный URL. Допустимы только ссылки на веб-страницы.")
+
+        # Извлечение ID документа из URL Google Docs с помощью регулярного выражения
+        match_ = re.search('/document/d/([a-zA-Z0-9-_]+)', url)
+        if match_ is None:
+            raise ValueError('Неверный Google Docs URL')
+
+        # Получение ID документа
+        doc_id = match_.group(1)
+
+        # Формирование URL для экспорта документа в формате .txt
+        response = requests.get(f'https://docs.google.com/document/d/{doc_id}/export?format=txt')
+
+        # Проверка, что запрос успешен (статус 200)
+        response.raise_for_status()
+
+        # Получение текста документа
+        text = response.text
+
+        # Создание эмбеддингов и загрузка текста в векторную базу
+        return self.create_embedding(text)
+
+    # Метод для создания эмбеддингов из текста и сохранения в Chroma
+    def create_embedding(self, data):
+        source_chunks = []  # Список для хранения фрагментов текста
+        # Разделение текста по символу новой строки, размер чанка — 1024 символа
+        splitter = CharacterTextSplitter(separator="\n", chunk_size=1024, chunk_overlap=0)
+        # Разделение текста на чанки
+        for chunk in splitter.split_text(data):
+            # Каждый чанк оборачивается в объект Document
+            source_chunks.append(Document(page_content=chunk, metadata={}))
+
+        # Подсчёт общего количества токенов во всех чанках
+        count_token = self.num_tokens_from_string(' '.join([x.page_content for x in source_chunks]))
+        # Запись в лог
+        self.log += f'Количество токенов в документе: {count_token}\n'
+
+        # Создание векторной базы Chroma из документов с использованием эмбеддингов OpenAI
+        self.search_index = Chroma.from_documents(source_chunks, OpenAIEmbeddings())
+        self.log += 'Данные загружены в векторную базу данных.\n'
+        return self.search_index
+
+    # Метод подсчёта количества токенов в строке
+    def num_tokens_from_string(self, string):
+        # Получение кодировщика для указанной модели
+        encoding = tiktoken.encoding_for_model(self.model)
+        # Кодирование строки в токены и подсчёт их количества
+        num_tokens = len(encoding.encode(string))
+        return num_tokens
+
+    # Метод для ответа на вопрос с использованием векторного поиска
+    def answer_index(self, system, topic, temp=1):
+        # Проверка, загружена ли векторная база
+        if not self.search_index:
+            return "Ошибка: Модель не обучена!"
+
+        # Поиск 5 наиболее релевантных фрагментов по запросу
+        docs = self.search_index.similarity_search(topic, k=5)
+
+        # Формирование строки с найденными фрагментами
+        message_content = '\n'.join([f"Отрывок документа №{i+1}:\n{doc.page_content}" for i, doc in enumerate(docs)])
+
+        # Формирование списка сообщений для отправки в модель
+        messages = [
+            {"role": "system", "content": system + f"\n{message_content}"},  # Системный промпт + контекст
+            {"role": "user", "content": topic}  # Вопрос пользователя
+        ]
+
+        # Подсчёт и запись количества токенов в лог
+        self.log += f"Токенов использовано на вопрос: {self.num_tokens_from_messages(messages, self.model)}\n"
+
+        # Запрос к OpenAI для генерации ответа
+        completion = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temp  # Уровень случайности: 1 — высокая
+        )
+
+        # Запись статистики по использованным токенам
+        self.log += f'Токенов использовано всего (вопрос): {completion.usage.prompt_tokens}\n'
+        self.log += f'Токенов использовано всего (вопрос-ответ): {completion.usage.total_tokens}\n'
+
+        # Возврат сгенерированного ответа
+        return completion.choices[0].message.content
+
+    # Вспомогательный метод для подсчёта токенов в списке сообщений
+    def num_tokens_from_messages(self, messages, model):
+        try:
+            # Попытка получить кодировщик для указанной модели
+            encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            # Если модель неизвестна — использовать базовый кодировщик
+            encoding = tiktoken.get_encoding("cl100k_base")
+
+        # Дополнительные токены на форматирование сообщений
+        tokens_per_message = 3  # На каждое сообщение добавляется ~3 токена
+        tokens_per_name = 1     # На имя в сообщении — 1 токен
+
+        num_tokens = 0
+        for message in messages:
+            num_tokens += tokens_per_message  # За счёт форматирования
+            for key, value in message.items():
+                num_tokens += len(encoding.encode(value))  # Токены содержимого
+                if key == "name":
+                    num_tokens += tokens_per_name  # Дополнительный токен за имя
+        num_tokens += 3  # За завершение диалога
+        return num_tokens
+
+
+# Класс нейро-веб-дизайнера — наследник базового класса GPT
+class WebDesignGPT(GPT):
+    def __init__(self, model="gpt-3.5-turbo"):
+        super().__init__(model)  # Вызов конструктора родительского класса
+        self.name = "Нейро-веб-дизайнер"
+        # Системный промпт — инструкция для модели
+        self.system_prompt = '''Ты — специалист по веб-дизайну. Твоя задача — отвечать на вопросы, связанные с созданием сайтов, UI/UX дизайном, адаптивным дизайном и другими аспектами веб-разработки.
+                                 Отвечай максимально точно по документу, не придумывай ничего от себя.
+                                 Если информации в документе недостаточно, скажи "Я не знаю".
+                                 Документ с информацией: '''
+
+    # Метод для ответа на вопрос — использует базовую логику с системным промптом
+    def answer(self, query):
+        return self.answer_index(self.system_prompt, query)
+
+
+# Основной блок программы — запускается только при прямом запуске скрипта
+if __name__ == "__main__":
+    # Создание экземпляра нейро-веб-дизайнера
+    web_designer = WebDesignGPT()
+
+    # URL Google Docs с информацией по веб-дизайну
+    # ВАЖНО: пользователь должен вставить свой документ
+    data_url = "https://docs.google.com/document/d/1P1hWM14bhrs0YmtoBT5qQ0I7ivjhzKYzuAhxPBVbmfQ/edit?tab=t.0"
+
+    # Загрузка документа и создание векторной базы знаний
+    web_designer.load_search_indexes(data_url)
+
+    # Приветственное сообщение
+    print("Добро пожаловать! Я ваш нейро-веб-дизайнер.")
+
+    # Бесконечный цикл общения с пользователем
+    while True:
+        # Ввод вопроса от пользователя
+        query = input("Введите ваш вопрос (или 'выход' для завершения): ").strip()
+
+        # Проверка условия выхода
+        if query.lower() == "выход":
+            print("Работа завершена. До свидания!")
+            break
+
+        # Получение ответа от модели
+        response = web_designer.answer(query)
+
+        # Вывод ответа
+        print(f"Ответ: {response}")
